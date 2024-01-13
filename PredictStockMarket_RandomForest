@@ -1,0 +1,127 @@
+#import yahoo finance api
+import yfinance as yf
+import matplotlib.pyplot as plt
+import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
+#precision_score checks the frequency of when we said the price would go up, did it actually go up 
+from sklearn.metrics import precision_score
+
+#download a ticker class which will get us price history for a single symbol
+sp500 = yf.Ticker("^GSPC")
+
+#query all the data since it was created
+sp500 = sp500.history(period="max")
+#print(sp500.to_string)
+
+#plot the line on the closing price with the date (index) on x axis
+sp500.plot.line(y = "Close", use_index=True)
+#plt.show()
+
+#get rid of extra data we don't need
+del sp500["Dividends"]
+del sp500["Stock Splits"]
+
+#add a tomorrow column that we will predict
+#we use the shift method so the tomorrow price is the closing price fromm the next day in the data
+sp500["Tomorrow"] = sp500["Close"].shift(-1)
+
+# make a new column target which saves in an int if tomorrows price > closing price
+sp500["Target"] = (sp500["Tomorrow"] > sp500["Close"]).astype(int)
+#print(sp500.to_string)
+
+#get rid of anything older than 1990 because the old market will shift our predictions
+sp500 = sp500.loc["1990-01-01":].copy()
+
+#initialize our model
+#n_estimators is the number of decision trees you want to make (higher number = higher accuracy)
+#min_samples_split helps prevent overfitting
+#random_state = 1 means its a predictable random so if we rerun the model, it will come up with the same prediction
+model = RandomForestClassifier(n_estimators=100 , min_samples_split=100)
+
+#make a training data set (everything but the last 100 rows) and a testing set (last 100 rows)
+train = sp500.iloc[:-100]
+test = sp500.iloc[-100:]
+
+#predictors we should use to predict the target
+predictors= ["Close", "Volume", "Open", "High", "Low"]
+
+#we want the model to use the predictors to guess the target
+#this is the training step
+model.fit(train[predictors], train["Target"])
+
+#generate predictions
+preds = model.predict(test[predictors])
+
+#turn the predictions from a numpy array to a panda series to make it easier to work with
+preds = pd.Series(preds, index=test.index)
+#print(preds.to_string)
+
+#calculate the precision score
+#print(precision_score(test["Target"], preds))
+
+#make a plot to show us what the actual price was and our prediction was
+combined = pd.concat([test["Target"], preds], axis=1)
+combined.plot()
+#plt.show()
+
+#backtesting : 
+#create a function
+def predict(train,test,predictors,model):
+        model.fit(train[predictors], train["Target"])
+        preds = model.predict_proba(test[predictors]) [:,1]
+        preds[preds >= .6] = 1
+        preds[preds < .6] = 0
+        preds = pd.Series(preds, index=test.index, name="Predictions")
+        combined = pd.concat([test["Target"], preds], axis=1)
+        return combined
+
+# 250 trading days in a year, so start means train your first model on the first
+# 10 years of data, then step means to predict the next 250 days (predict the next year)
+def backtest(data,model,predictors,start=2500,step=250) :
+    all_predictions = [] 
+    #go from beginning to end of data, by the step value each time (one year at a time)
+    for i in range (start, data.shape[0], step) : 
+        #make the training data from 0-i
+        train = data.iloc[0:i].copy()
+        #make the test data from i-the end of that step
+        test = data.iloc[i:(i+step)].copy()
+        #call the predictions function we just made to get the predictions the model made for that year
+        predictions = predict(train,test,predictors,model)
+        #add these predictions to the all_predictions array
+        all_predictions.append(predictions)
+    #put all of the all_predictions arrays from all the times the for loop ran together 
+    return pd.concat(all_predictions)
+
+#testing it
+predictions = backtest(sp500,model,predictors)
+#print(predictions["Predictions"].value_counts())
+#print(precision_score(predictions["Target"], predictions["Predictions"]))
+
+#adding more predictors to make it more accurate 
+horizons = [2,5,60,250,1000]
+new_predictors = []
+
+for horizon in horizons: 
+    rolling_averages = sp500.rolling(horizon).mean()
+
+    #adding the 2,5,60, etc rolling average columns to the sp500 dataset
+    ratio_column = f"Close_Ratio_{horizon}"
+    sp500[ratio_column] = sp500["Close"] / rolling_averages["Close"]
+
+    trend_column = f"Trend_{horizon}"
+    sp500[trend_column] = sp500.shift(1).rolling(horizon).sum()["Target"]
+
+    new_predictors += [ratio_column, trend_column]
+#get rid of null column datasets because the number of days wasn't right to do the caluclations
+sp500 = sp500.dropna()
+#print(sp500.to_string)
+
+#make the model better
+model = RandomForestClassifier(n_estimators=200, min_samples_split=50, random_state=1)
+
+#make new predictions
+predictions = backtest(sp500, model, new_predictors)
+#print(predictions["Predictions"].value_counts())
+
+#check how accurate it was
+print(precision_score(predictions["Target"], predictions["Predictions"]))
